@@ -2,8 +2,8 @@
 import os
 import logging
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 
 
 #Logging
@@ -39,6 +39,45 @@ def get_limited_tags(post, max_tags=15, max_length=900):
 
     return " ".join(limited_tags)
 
+async def send_character_image(message, character: str):
+    """Fetch a random image from Danbooru and send it with limited tags + button"""
+    url = f"https://danbooru.donmai.us/posts.json?tags={character}+rating:safe&limit=1&random=true"
+    headers = {"User-Agent": os.getenv("USER_AGENT")}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        data = response.json()
+
+        if not data:
+            await message.reply_text("No image found for that character.")
+            return
+
+        post = data[0]
+        image_url = post.get("file_url") or post.get("large_file_url") or post.get("preview_file_url")
+        photo_tags = get_limited_tags(post)
+
+        if post.get("file_size", 0) > 20_000_000:
+            await message.reply_text(
+                "Image is too large to send via Telegram.\n"
+                f"Image URL: {image_url}"
+            )
+            return
+
+        if not image_url:
+            await message.reply_text("Image URL invalid or unavailable.")
+            return
+
+        # Inline button
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔄 Another one", callback_data=f"another|{character}")]]
+        )
+
+        await message.reply_photo(photo=image_url, caption=f"Tags:\n{photo_tags}", reply_markup=keyboard)
+
+    except Exception as e:
+        await message.reply_text("Error fetching image.")
+        logging.error(e)
+
 
 # --- COMMAND HANDLERS ---
 
@@ -68,59 +107,17 @@ async def character(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("You didn't write the name of any character after /character!")
         return
 
-    # Join args with underscores (example: if you type "Yuuki Asuna" it will become "Yuuki_Asuna")
     character = "_".join(context.args)
-
-    url = f"https://danbooru.donmai.us/posts.json?tags={character}+rating:safe&limit=1&random=true"
-
-    headers = {
-        "User-Agent": os.getenv("USER_AGENT")
-    }
     await update.message.reply_text("Fetching image...")
+    await send_character_image(update.message, character)
 
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        data = response.json()
-        
-        if not data:
-            await update.message.reply_text("No image found for that character. If you typed for example 'Asuna Yuuki, try 'Yuuki Asuna' instead.")
-            return
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-        post = data[0]
-
-        # Fallback URL: try file_url, then large_file_url, then preview_file_url
-        image_url = post.get("file_url") or post.get("large_file_url") or post.get("preview_file_url")
-        photo_tags = post.get("tag_string", "")
-
-        # File too large check (Telegram max ~20MB)
-        if post.get("file_size", 0) > 20_000_000:
-            await update.message.reply_text("Image is too large to send via Telegram. \n" \
-            f"image URL: {image_url} \n" \
-            "You can try to open the link and download it manually.")
-            return
-
-        # Check if URL is valid/reachable
-        def check_url(url):
-            try:
-                r = requests.head(url, timeout=5)
-                return r.status_code == 200
-            except:
-                return False
-
-        if not image_url or not check_url(image_url):
-            await update.message.reply_text("Image URL invalid or unavailable.")
-            return
-
-        # Limit tag count (max 20 tags to avoid caption too long)
-        tag_list = photo_tags.split()
-        limited_tags = " ".join(tag_list[:20])
-
-        await update.message.reply_photo(photo=image_url, caption=f"Tags:\n{limited_tags}")
-
-    except Exception as e:
-        await update.message.reply_text("Error fetching image.")
-        logging.error(e)
-
+    if query.data.startswith("another|"):
+        character = query.data.split("|", 1)[1]
+        await send_character_image(query.message, character)
 
 # --- MAIN ---
 def main():
@@ -129,6 +126,7 @@ def main():
     app.add_handler(CommandHandler("character", character))
     app.add_handler(CommandHandler("help", help))
     app.add_handler(CommandHandler("tags", tags))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
     app.run_polling()
 
